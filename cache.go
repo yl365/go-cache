@@ -1,8 +1,9 @@
-package cache
+package main
 
 import (
 	"encoding/gob"
 	"fmt"
+	gzip "github.com/klauspost/pgzip"
 	"io"
 	"os"
 	"runtime"
@@ -43,6 +44,10 @@ type cache struct {
 	mu                sync.RWMutex
 	onEvicted         func(string, interface{})
 	janitor           *janitor
+}
+
+func (c *cache) GobRegisterType(x interface{}) {
+	gob.Register(x)
 }
 
 // Add an item to the cache, replacing any existing item. If the duration is 0
@@ -961,18 +966,24 @@ func (c *cache) OnEvicted(f func(string, interface{})) {
 // NOTE: This method is deprecated in favor of c.Items() and NewFrom() (see the
 // documentation for NewFrom().)
 func (c *cache) Save(w io.Writer) (err error) {
-	enc := gob.NewEncoder(w)
+
 	defer func() {
 		if x := recover(); x != nil {
 			err = fmt.Errorf("Error registering item types with Gob library")
 		}
 	}()
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
 	for _, v := range c.items {
 		gob.Register(v.Object)
 	}
+
+	gzw, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+	enc := gob.NewEncoder(gzw)
 	err = enc.Encode(&c.items)
+	gzw.Close()
 	return
 }
 
@@ -986,6 +997,7 @@ func (c *cache) SaveFile(fname string) error {
 	if err != nil {
 		return err
 	}
+
 	err = c.Save(fp)
 	if err != nil {
 		fp.Close()
@@ -1000,7 +1012,11 @@ func (c *cache) SaveFile(fname string) error {
 // NOTE: This method is deprecated in favor of c.Items() and NewFrom() (see the
 // documentation for NewFrom().)
 func (c *cache) Load(r io.Reader) error {
-	dec := gob.NewDecoder(r)
+
+	gzr, _ := gzip.NewReader(r)
+	defer gzr.Close()
+
+	dec := gob.NewDecoder(gzr)
 	items := map[string]Item{}
 	err := dec.Decode(&items)
 	if err == nil {
@@ -1026,6 +1042,7 @@ func (c *cache) LoadFile(fname string) error {
 	if err != nil {
 		return err
 	}
+
 	err = c.Load(fp)
 	if err != nil {
 		fp.Close()
